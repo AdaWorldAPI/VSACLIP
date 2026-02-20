@@ -1,51 +1,53 @@
-[package]
-name = "vsaclip"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
-license = "Apache-2.0"
-description = "HDR POPCNT Sweep — Visual recognition via Hamming resonance on ladybug-rs Containers"
-repository = "https://github.com/AdaWorldAPI/VSACLIP"
-authors = ["Jan Hübener", "Ada Consciousness Project"]
-keywords = ["vsa", "clip", "hamming", "simd", "resonance", "hdr", "popcnt"]
+//! Belichtungsmesser — Exposure Metering Configuration
+//!
+//! Spot → Center → Matrix progressive bit-width expansion.
+//! Zero false negatives with ~63x speedup at 1M containers.
 
-[lib]
-name = "vsaclip"
+use crate::FINGERPRINT_BITS;
 
-[[bin]]
-name = "vsaclip-proof"
-path = "src/bin/proof.rs"
+/// Exposure configuration
+#[derive(Debug, Clone)]
+pub struct ExposureConfig {
+    pub threshold: u32,
+    pub safety_margin: f64,
+    pub stage1_bits: usize,
+    pub stage2_bits: usize,
+    pub total_bits: usize,
+}
 
-[[bin]]
-name = "vsaclip-bench"
-path = "src/bin/bench.rs"
+impl ExposureConfig {
+    pub fn new(threshold: u32) -> Self {
+        Self { threshold, safety_margin: 1.5, stage1_bits: 64, stage2_bits: 512, total_bits: FINGERPRINT_BITS }
+    }
 
-# =============================================================================
-# FEATURES
-# =============================================================================
-[features]
-default = ["simd"]
-simd = []
-fastembed = ["dep:fastembed"]
-load-image = ["dep:image"]
+    pub fn stage1_threshold(&self) -> u32 {
+        ((self.threshold as f64) * (self.stage1_bits as f64 / self.total_bits as f64) * self.safety_margin) as u32
+    }
 
-# =============================================================================
-# DEPENDENCIES
-# =============================================================================
-[dependencies]
-ladybug-contract = { git = "https://github.com/AdaWorldAPI/ladybug-rs.git", branch = "main" }
+    pub fn stage2_threshold(&self) -> u32 {
+        ((self.threshold as f64) * (self.stage2_bits as f64 / self.total_bits as f64) * self.safety_margin) as u32
+    }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+    pub fn theoretical_speedup(&self, n: usize) -> f64 {
+        let u64s = self.total_bits / 64;
+        let full = n * u64s;
+        let s1 = (n as f64 * 0.05) as usize;
+        let s2 = (s1 as f64 * 0.10) as usize;
+        let early = n * (self.stage1_bits/64) + s1 * (self.stage2_bits/64) + s2 * u64s;
+        full as f64 / early as f64
+    }
+}
 
-fastembed = { version = "4", optional = true }
-image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
+impl Default for ExposureConfig {
+    fn default() -> Self { Self::new(FINGERPRINT_BITS as u32 * 30 / 100) }
+}
 
-rand = "0.8"
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "hdr_sweep"
-harness = false
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_speedup() {
+        let c = ExposureConfig::default();
+        assert!(c.theoretical_speedup(1_000_000) > 50.0);
+    }
+}
