@@ -1,91 +1,162 @@
-//! Three-Layer Resonance Cascade
+//! Resonance Cascade — multi-layer visual recognition pipeline.
 //!
-//! L1 Features → L2 Parts → L3 Objects
-//! Majority-vote superposition between layers.
+//! Three-layer architecture where each layer's output becomes
+//! the next layer's input via majority-vote superposition:
+//!
+//! ```text
+//! Layer 1 (Features):  patches → sweep → activated features
+//! Layer 2 (Parts):     features → bundle → sweep → activated parts
+//! Layer 3 (Objects):   parts → bundle → sweep → recognized objects
+//! ```
+//!
+//! No training. No backpropagation. No loss function.
+//! Learning happens via XOR-bind commitments during inference.
 
-use crate::{Fingerprint, ResonanceMatch, FINGERPRINT_BITS, FINGERPRINT_U64};
-use crate::sweep::hdr_sweep;
-use crate::hamming_distance;
+use ladybug_contract::container::Container;
+use crate::sweep::{hdr_sweep, SweepConfig, SweepResult};
+use crate::ResonanceMatch;
 
 /// A layer in the resonance cascade
-pub struct CascadeLevel {
-    pub containers: Vec<Fingerprint>,
-    pub labels: Vec<Option<String>>,
-    pub threshold: u32,
-    pub activations: Vec<u64>,
+pub struct ResonanceLayer {
+    /// Name for debugging
+    pub name: String,
+    /// The container corpus for this layer
+    pub containers: Vec<Container>,
+    /// Sweep configuration (threshold, HDR bands)
+    pub config: SweepConfig,
+    /// How many top activations to propagate to next layer
+    pub top_k: usize,
 }
 
-impl CascadeLevel {
-    pub fn new(threshold_pct: f64) -> Self {
+impl ResonanceLayer {
+    pub fn new(name: impl Into<String>, containers: Vec<Container>, threshold: u32) -> Self {
         Self {
-            containers: Vec::new(), labels: Vec::new(),
-            threshold: (FINGERPRINT_BITS as f64 * threshold_pct) as u32,
-            activations: Vec::new(),
+            name: name.into(),
+            containers,
+            config: SweepConfig {
+                threshold,
+                ..Default::default()
+            },
+            top_k: 20,
         }
     }
 
-    pub fn add(&mut self, fp: Fingerprint, label: Option<String>) {
-        self.containers.push(fp); self.labels.push(label); self.activations.push(0);
+    /// Run a sweep against this layer
+    pub fn sweep(&self, query: &Container) -> SweepResult {
+        hdr_sweep(query, &self.containers, &self.config)
     }
 
-    pub fn activate(&mut self, input: &Fingerprint) -> Vec<ResonanceMatch> {
-        let matches = hdr_sweep(input, &self.containers, self.threshold);
-        for m in &matches { self.activations[m.index] += 1; }
-        matches
+    /// Get the containers of the top-K activated matches
+    pub fn activated_containers(&self, matches: &[ResonanceMatch]) -> Vec<&Container> {
+        matches.iter()
+            .take(self.top_k)
+            .map(|m| &self.containers[m.index])
+            .collect()
     }
-
-    pub fn len(&self) -> usize { self.containers.len() }
 }
 
-/// Majority-vote superposition — robust for any K
-pub fn majority_superpose(fps: &[&Fingerprint]) -> Fingerprint {
-    let k = fps.len();
-    if k <= 1 { return fps.first().map(|f| (*f).clone()).unwrap_or_else(|| Fingerprint::from_raw([0u64; FINGERPRINT_U64])); }
-    let thresh = k / 2;
-    let mut result = [0u64; FINGERPRINT_U64];
-    for word in 0..FINGERPRINT_U64 {
-        let mut out = 0u64;
-        for bit in 0..64u32 {
-            let mask = 1u64 << bit;
-            let count = fps.iter().filter(|fp| fp.as_raw()[word] & mask != 0).count();
-            if count > thresh { out |= mask; }
+/// Result of a full cascade (all layers)
+#[derive(Debug)]
+pub struct CascadeResult {
+    pub layer_results: Vec<LayerResult>,
+    pub recognized: Vec<ResonanceMatch>,
+}
+
+#[derive(Debug)]
+pub struct LayerResult {
+    pub name: String,
+    pub matches: Vec<ResonanceMatch>,
+    pub instructions: u64,
+}
+
+/// Run a full resonance cascade through multiple layers.
+///
+/// Input `query` is typically a majority-bundle of image patches.
+/// Each layer sweeps its corpus, then bundles the top-K activations
+/// into a new query for the next layer.
+pub fn cascade(query: &Container, layers: &[ResonanceLayer]) -> CascadeResult {
+    let mut current_query = query.clone();
+    let mut layer_results = Vec::new();
+
+    for layer in layers {
+        let result = layer.sweep(&current_query);
+
+        let lr = LayerResult {
+            name: layer.name.clone(),
+            matches: result.matches.clone(),
+            instructions: result.instructions,
+        };
+
+        // Bundle top-K activations as query for next layer
+        if !result.matches.is_empty() {
+            let activated = layer.activated_containers(&result.matches);
+            let refs: Vec<&Container> = activated.into_iter().collect();
+            if !refs.is_empty() {
+                current_query = Container::bundle(&refs);
+            }
         }
-        result[word] = out;
+
+        layer_results.push(lr);
     }
-    Fingerprint::from_raw(result)
+
+    let recognized = layer_results.last()
+        .map(|lr| lr.matches.clone())
+        .unwrap_or_default();
+
+    CascadeResult {
+        layer_results,
+        recognized,
+    }
 }
 
-/// Three-layer resonance cascade
-pub struct Cascade {
-    pub features: CascadeLevel,
-    pub parts: CascadeLevel,
-    pub objects: CascadeLevel,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Cascade {
-    pub fn new() -> Self {
-        Self {
-            features: CascadeLevel::new(0.30),
-            parts: CascadeLevel::new(0.35),
-            objects: CascadeLevel::new(0.40),
+    fn make_near(reference: &Container, approx_dist: usize) -> Container {
+        let mut c = reference.clone();
+        let mut state = approx_dist as u64 ^ 0xCAFEBABE;
+        for _ in 0..approx_dist {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let bit = (state as usize) % 8192;
+            c.words[bit / 64] ^= 1u64 << (bit % 64);
         }
+        c
     }
 
-    pub fn recognize(&mut self, input: &Fingerprint) -> Vec<ResonanceMatch> {
-        let l1 = self.features.activate(input);
-        if l1.is_empty() { return Vec::new(); }
-        let refs1: Vec<&Fingerprint> = l1.iter().take(20).map(|m| &self.features.containers[m.index]).collect();
-        let sup1 = majority_superpose(&refs1);
-        let l2 = self.parts.activate(&sup1);
-        if l2.is_empty() { return Vec::new(); }
-        let refs2: Vec<&Fingerprint> = l2.iter().take(10).map(|m| &self.parts.containers[m.index]).collect();
-        let sup2 = majority_superpose(&refs2);
-        self.objects.activate(&sup2)
-    }
+    #[test]
+    fn test_two_layer_cascade() {
+        // Layer 1: 50 features
+        let features: Vec<Container> = (0..50u64)
+            .map(|s| Container::random(s + 100))
+            .collect();
 
-    /// Exposure learning: unmatched inputs become new containers
-    pub fn expose(&mut self, input: &Fingerprint) {
-        let l1 = self.features.activate(input);
-        if l1.is_empty() { self.features.add(input.clone(), None); }
+        // Layer 2: 10 parts, each is bundle of 2-3 features
+        let mut parts = Vec::new();
+        for i in 0..10 {
+            let refs: Vec<&Container> = (0..3).map(|j| &features[(i * 3 + j) % 50]).collect();
+            parts.push(Container::bundle(&refs));
+        }
+
+        // Query: close to feature[0] and feature[1]
+        let query_parts = vec![
+            make_near(&features[0], 400),
+            make_near(&features[1], 400),
+        ];
+        let refs: Vec<&Container> = query_parts.iter().collect();
+        let query = Container::bundle(&refs);
+
+        let layers = vec![
+            ResonanceLayer::new("features", features, 3500),
+            ResonanceLayer::new("parts", parts, 3800),
+        ];
+
+        let result = cascade(&query, &layers);
+
+        assert_eq!(result.layer_results.len(), 2);
+        println!("L1 matches: {}", result.layer_results[0].matches.len());
+        println!("L2 matches: {}", result.layer_results[1].matches.len());
     }
 }
