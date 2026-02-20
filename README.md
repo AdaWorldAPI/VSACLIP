@@ -1,76 +1,47 @@
-# VSACLIP — Resonance Vision Without Training
+# VSACLIP — HDR POPCNT Sweep Engine
 
-**Vector Symbolic Architecture meets CLIP: Image recognition through Hamming resonance, not gradient descent.**
+Visual recognition via Hamming resonance on [ladybug-rs](https://github.com/AdaWorldAPI/ladybug-rs) Containers.
 
-[![ladybug-rs](https://img.shields.io/badge/powered_by-ladybug--rs-blue.svg)](https://github.com/AdaWorldAPI/ladybug-rs)
+## Core Claim
 
-## The Claim
-
-A vision system where:
-- **Weights** are immutable binary containers (not trained matrices)
-- **Activation** is POPCNT (not ReLU)
+A neural network where:
+- **Weights** are immutable 8192-bit Containers (not trained matrices)
+- **Activation** is `POPCNT` (not ReLU)
 - **Attention** is HDR exposure stacking (not softmax)
-- **Inference** is XOR + POPCNT (not matrix multiplication)
-- **Learning** is XOR-Bind (not backpropagation)
-- **No training set.** Seeds + exposure + time.
+- **Inference** is `XOR + POPCNT` (not matrix multiplication)
+- **Learning** is `XOR-Bind` (not backpropagation)
+- **Early Exit** is progressive bit-width expansion (not learned gating)
 
-Inference: **~85μs** for 1M containers on AVX-512. No GPU.
+## Performance
 
-## Architecture
+| Containers | Full Sweep | HDR Early Exit | AVX-512 | Speedup |
+|-----------|-----------|---------------|---------|---------|
+| 10K       | 427 μs    | 7 μs          | ~1 μs   | 63×     |
+| 1M        | 43 ms     | 680 μs        | ~85 μs  | 63×     |
+| 10M       | 427 ms    | 6.8 ms        | ~850 μs | 63×     |
 
-```
-Image → CLIP (float32) → SimHash → Fingerprint (16384-bit)
-                                        ↓
-                              HDR POPCNT Sweep (ladybug-rs SIMD)
-                                        ↓
-                              Resonance Cascade (3 layers)
-                                        ↓
-                              Emergent Recognition
-```
-
-### Powered by ladybug-rs
-
-| Component | ladybug-rs module | Purpose |
-|-----------|------------------|---------|
-| Fingerprint | `core::Fingerprint` | 16384-bit aligned binary vectors |
-| SIMD | `core::simd` | AVX-512/AVX2/NEON Hamming distance |
-| HDR Cascade | `search::hdr_cascade` | Multi-resolution search |
-| Container | `container::*` | Immutable BindSpace |
-
-## Proof of Concept
+## Quick Start
 
 ```bash
-cd proof/
-pip install numpy
-python hdr_proof.py
+cargo run --bin vsaclip-proof   # proof-of-concept (6 tests)
+cargo bench                     # criterion benchmarks
+cargo test                      # unit tests
 ```
 
-All 7 tests pass:
-- ✓ Majority-vote superposition: rank 0 at K=49
-- ✓ Early exit: 31× speedup, zero false negatives
-- ✓ HDR scoring: 96.2% noise floor
-- ✓ Resonance cascade: 5/5 classes organic
-- ✓ Three-layer pipeline: recognition without labels
-- ✓ 63× instruction speedup at scale
-- ✓ Anti-resonance: free lateral inhibition
+## Depends On
 
-## Structure
+- `ladybug-contract` — Container type (8192-bit), xor(), hamming(), bundle()
 
-```
-VSACLIP/
-├── Cargo.toml          # depends on ladybug-rs
-├── src/
-│   ├── lib.rs          # HdrScore, ResonanceMatch
-│   ├── simhash.rs      # float32 → Fingerprint
-│   ├── sweep.rs        # HDR POPCNT Sweep
-│   ├── cascade.rs      # 3-layer resonance cascade
-│   ├── exposure.rs     # Belichtungsmesser config
-│   └── ingest.rs       # CLIP pipeline (optional)
-├── proof/
-│   └── hdr_proof.py    # Python proof (ALL PASS)
-└── benches/
-    └── sweep_bench.rs  # Criterion benchmarks
-```
+## Modules
+
+| Module | Purpose |
+|--------|---------|
+| `container_ext` | Partial Hamming, early-exit, anti-resonance |
+| `hdr` | HDR exposure scoring (0-6 scale) |
+| `sweep` | Core HDR POPCNT sweep engine |
+| `exposure` | Belichtungsmesser stage configuration |
+| `cascade` | Multi-layer resonance pipeline |
+| `ingest` | SimHash: float embeddings → binary Containers |
 
 ## License
 
