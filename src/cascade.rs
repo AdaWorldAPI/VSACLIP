@@ -1,51 +1,91 @@
-[package]
-name = "vsaclip"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
-license = "Apache-2.0"
-description = "HDR POPCNT Sweep — Visual recognition via Hamming resonance on ladybug-rs Containers"
-repository = "https://github.com/AdaWorldAPI/VSACLIP"
-authors = ["Jan Hübener", "Ada Consciousness Project"]
-keywords = ["vsa", "clip", "hamming", "simd", "resonance", "hdr", "popcnt"]
+//! Three-Layer Resonance Cascade
+//!
+//! L1 Features → L2 Parts → L3 Objects
+//! Majority-vote superposition between layers.
 
-[lib]
-name = "vsaclip"
+use crate::{Fingerprint, ResonanceMatch, FINGERPRINT_BITS, FINGERPRINT_U64};
+use crate::sweep::hdr_sweep;
+use crate::hamming_distance;
 
-[[bin]]
-name = "vsaclip-proof"
-path = "src/bin/proof.rs"
+/// A layer in the resonance cascade
+pub struct CascadeLevel {
+    pub containers: Vec<Fingerprint>,
+    pub labels: Vec<Option<String>>,
+    pub threshold: u32,
+    pub activations: Vec<u64>,
+}
 
-[[bin]]
-name = "vsaclip-bench"
-path = "src/bin/bench.rs"
+impl CascadeLevel {
+    pub fn new(threshold_pct: f64) -> Self {
+        Self {
+            containers: Vec::new(), labels: Vec::new(),
+            threshold: (FINGERPRINT_BITS as f64 * threshold_pct) as u32,
+            activations: Vec::new(),
+        }
+    }
 
-# =============================================================================
-# FEATURES
-# =============================================================================
-[features]
-default = ["simd"]
-simd = []
-fastembed = ["dep:fastembed"]
-load-image = ["dep:image"]
+    pub fn add(&mut self, fp: Fingerprint, label: Option<String>) {
+        self.containers.push(fp); self.labels.push(label); self.activations.push(0);
+    }
 
-# =============================================================================
-# DEPENDENCIES
-# =============================================================================
-[dependencies]
-ladybug-contract = { git = "https://github.com/AdaWorldAPI/ladybug-rs.git", branch = "main" }
+    pub fn activate(&mut self, input: &Fingerprint) -> Vec<ResonanceMatch> {
+        let matches = hdr_sweep(input, &self.containers, self.threshold);
+        for m in &matches { self.activations[m.index] += 1; }
+        matches
+    }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+    pub fn len(&self) -> usize { self.containers.len() }
+}
 
-fastembed = { version = "4", optional = true }
-image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
+/// Majority-vote superposition — robust for any K
+pub fn majority_superpose(fps: &[&Fingerprint]) -> Fingerprint {
+    let k = fps.len();
+    if k <= 1 { return fps.first().map(|f| (*f).clone()).unwrap_or_else(|| Fingerprint::from_raw([0u64; FINGERPRINT_U64])); }
+    let thresh = k / 2;
+    let mut result = [0u64; FINGERPRINT_U64];
+    for word in 0..FINGERPRINT_U64 {
+        let mut out = 0u64;
+        for bit in 0..64u32 {
+            let mask = 1u64 << bit;
+            let count = fps.iter().filter(|fp| fp.as_raw()[word] & mask != 0).count();
+            if count > thresh { out |= mask; }
+        }
+        result[word] = out;
+    }
+    Fingerprint::from_raw(result)
+}
 
-rand = "0.8"
+/// Three-layer resonance cascade
+pub struct Cascade {
+    pub features: CascadeLevel,
+    pub parts: CascadeLevel,
+    pub objects: CascadeLevel,
+}
 
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+impl Cascade {
+    pub fn new() -> Self {
+        Self {
+            features: CascadeLevel::new(0.30),
+            parts: CascadeLevel::new(0.35),
+            objects: CascadeLevel::new(0.40),
+        }
+    }
 
-[[bench]]
-name = "hdr_sweep"
-harness = false
+    pub fn recognize(&mut self, input: &Fingerprint) -> Vec<ResonanceMatch> {
+        let l1 = self.features.activate(input);
+        if l1.is_empty() { return Vec::new(); }
+        let refs1: Vec<&Fingerprint> = l1.iter().take(20).map(|m| &self.features.containers[m.index]).collect();
+        let sup1 = majority_superpose(&refs1);
+        let l2 = self.parts.activate(&sup1);
+        if l2.is_empty() { return Vec::new(); }
+        let refs2: Vec<&Fingerprint> = l2.iter().take(10).map(|m| &self.parts.containers[m.index]).collect();
+        let sup2 = majority_superpose(&refs2);
+        self.objects.activate(&sup2)
+    }
+
+    /// Exposure learning: unmatched inputs become new containers
+    pub fn expose(&mut self, input: &Fingerprint) {
+        let l1 = self.features.activate(input);
+        if l1.is_empty() { self.features.add(input.clone(), None); }
+    }
+}
