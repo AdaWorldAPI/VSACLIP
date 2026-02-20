@@ -1,95 +1,77 @@
-//! CLIP Ingest Pipeline — Image → Fingerprint
-//!
-//! Uses fastembed-rs (ONNX Runtime) to embed images via CLIP ViT-B/32,
-//! then projects to binary Fingerprint via SimHash.
-//!
-//! This module is optional (`ingest` feature) because it pulls in ONNX.
-//! The core library (sweep, cascade, exposure) works without it.
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use vsaclip::ingest::ClipIngest;
-//!
-//! let ingest = ClipIngest::new()?;
-//! let fp = ingest.image_to_fingerprint("photo.jpg")?;
-//! let fps = ingest.batch_images(&["a.jpg", "b.jpg", "c.jpg"])?;
-//! ```
+//! Ingest Pipeline — float embeddings → Hamming containers via SimHash.
 
-// This module only compiles with the `ingest` feature
-#![cfg(feature = "ingest")]
+use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS};
 
-use crate::Fingerprint;
-use crate::simhash::clip_projector;
-use anyhow::Result;
-
-/// CLIP-based image ingest pipeline.
+/// Fast SimHash: project float embedding into binary Container.
 ///
-/// Lifecycle:
-/// 1. Load CLIP ViT-B/32 model (once, ~350MB download on first use)
-/// 2. For each image: embed → float32[512] → SimHash → Fingerprint
-pub struct ClipIngest {
-    // fastembed model handle
-    // model: fastembed::ImageEmbedding,
-    projector: crate::simhash::SimHashProjector,
+/// Each bit = sign(dot(embedding, random_hyperplane)).
+/// Preserves cosine similarity as Hamming similarity.
+pub fn simhash(embedding: &[f32], seed: u64) -> Container {
+    let dim = embedding.len();
+    let mut result = Container::zero();
+
+    for word_idx in 0..CONTAINER_WORDS {
+        let mut word = 0u64;
+
+        for bit in 0..64u32 {
+            let bit_idx = word_idx * 64 + bit as usize;
+            let mut dot = 0.0f32;
+
+            let mut state = seed
+                .wrapping_add(bit_idx as u64)
+                .wrapping_mul(0x9e3779b97f4a7c15);
+
+            for d in 0..dim {
+                state ^= state >> 30;
+                state = state.wrapping_mul(0xbf58476d1ce4e5b9);
+                state ^= state >> 27;
+                state = state.wrapping_mul(0x94d049bb133111eb);
+                state ^= state >> 31;
+
+                let sign = if state & 1 == 0 { 1.0f32 } else { -1.0f32 };
+                dot += embedding[d] * sign;
+            }
+
+            if dot >= 0.0 {
+                word |= 1u64 << bit;
+            }
+        }
+
+        result.words[word_idx] = word;
+    }
+
+    result
 }
 
-impl ClipIngest {
-    /// Create ingest pipeline. Downloads model on first use.
-    pub fn new() -> Result<Self> {
-        // TODO: Initialize fastembed CLIP model
-        // let model = fastembed::ImageEmbedding::try_new(
-        //     fastembed::ImageInitOptions::new(
-        //         fastembed::ImageEmbeddingModel::CLIPVitB32
-        //     )
-        // )?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        Ok(Self {
-            // model,
-            projector: clip_projector(),
-        })
+    #[test]
+    fn test_deterministic() {
+        let emb = vec![0.1, 0.2, 0.3, -0.1, 0.5];
+        assert_eq!(simhash(&emb, 42).hamming(&simhash(&emb, 42)), 0);
     }
 
-    /// Embed a single image file → Fingerprint
-    pub fn image_to_fingerprint(&self, _path: &str) -> Result<Fingerprint> {
-        // TODO: Read image, resize to 224×224, embed with CLIP
-        // let embedding = self.model.embed(vec![path])?;
-        // Ok(self.projector.project(&embedding[0]))
-        todo!("fastembed CLIP integration")
+    #[test]
+    fn test_preserves_similarity() {
+        let a = vec![1.0, 0.0, 0.5, 0.3, -0.2];
+        let b = vec![0.9, 0.1, 0.4, 0.3, -0.1];
+        let c = vec![-1.0, 0.5, -0.3, 0.8, 0.9];
+
+        let ca = simhash(&a, 42);
+        let cb = simhash(&b, 42);
+        let cc = simhash(&c, 42);
+
+        assert!(ca.hamming(&cb) < ca.hamming(&cc));
     }
 
-    /// Batch embed multiple images
-    pub fn batch_images(&self, _paths: &[&str]) -> Result<Vec<Fingerprint>> {
-        // TODO: Batch embed for efficiency
-        todo!("fastembed batch integration")
-    }
-
-    /// Embed from raw float32 vector (for pre-computed embeddings)
-    pub fn from_embedding(&self, embedding: &[f32]) -> Fingerprint {
-        self.projector.project(embedding)
-    }
-
-    /// Embed from raw bytes (PNG/JPEG in memory)
-    pub fn from_bytes(&self, _bytes: &[u8]) -> Result<Fingerprint> {
-        todo!("fastembed from-bytes integration")
-    }
-}
-
-/// Text-based CLIP embedding (for grounding labels to containers)
-pub struct ClipTextIngest {
-    projector: crate::simhash::SimHashProjector,
-}
-
-impl ClipTextIngest {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            projector: clip_projector(),
-        })
-    }
-
-    /// Embed text label → Fingerprint (same space as images)
-    pub fn text_to_fingerprint(&self, _text: &str) -> Result<Fingerprint> {
-        // TODO: CLIP text encoder
-        todo!("CLIP text encoding")
+    #[test]
+    fn test_balanced_popcount() {
+        let emb: Vec<f32> = (0..512).map(|i| (i as f32 * 0.1).sin()).collect();
+        let c = simhash(&emb, 42);
+        let pc = c.popcount();
+        let mid = CONTAINER_BITS as u32 / 2;
+        assert!(pc.abs_diff(mid) < mid / 4);
     }
 }
