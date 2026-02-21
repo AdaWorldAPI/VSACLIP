@@ -10,10 +10,12 @@ Substrate: `https://github.com/AdaWorldAPI/ladybug-rs` (ladybug-contract: 8192-b
 
 ## Golden Rule
 
-**Rust first. Python is the fallback, not the plan.**
+**Rust ONLY. No numpy. No Python in any hot path. EVER.**
 
-If a Rust approach fails to compile or a crate is broken, you may fall back to Python 
-with numpy for that specific step ONLY. Document the failure and tag it `// TODO: port to Rust`.
+Python exists ONLY as the CLIP embedding translator (`scripts/embed_hf.py`).
+This is a one-time pre-processing step that writes binary files.
+ALL Hamming operations — SimHash, sweep, cascade, Belichtungsmesser — are pure Rust.
+If a Rust crate is broken, fix it or find another Rust crate. Do NOT reach for numpy.
 Everything else stays in Rust.
 
 ## CRITICAL LESSONS FROM FIRST RUN
@@ -268,13 +270,13 @@ VSACLIP Proof-of-Concept
       False negatives: 0
 [6/6] Saving containers.bin...                     ok 97 MB
 
-No training. No GPU. No numpy in the hot path.
+No training. No GPU. No numpy. Period.
 ```
 
 ## Anti-Patterns — DO NOT
 
 - Do NOT use cosine similarity in the hot path
-- Do NOT use numpy unless Rust genuinely fails (document why)
+- Do NOT use numpy or Python for ANY new code — Rust only
 - Do NOT run SimHash single-threaded on 100K+ images (use rayon)
 - Do NOT try to push >100MB files to GitHub without LFS
 - Do NOT use HashMap for fingerprint lookup — POPCNT scan only
