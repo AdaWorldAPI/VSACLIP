@@ -1414,7 +1414,6 @@ dependencies = [
 [[package]]
 name = "ladybug-contract"
 version = "0.1.0"
-source = "git+https://github.com/AdaWorldAPI/ladybug-rs.git?branch=main#53dc026cd92219e5cc6707b9c1394d5708a20df9"
 dependencies = [
  "chrono",
  "serde",
