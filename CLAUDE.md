@@ -6,7 +6,7 @@ You are building **VSACLIP**: a pure-Rust proof-of-concept that does image recog
 through Hamming resonance — NO training, NO gradient descent, NO GPU, NO numpy.
 
 Repository: `https://github.com/AdaWorldAPI/VSACLIP`  
-Substrate: `https://github.com/AdaWorldAPI/ladybug-rs` (16384-bit Fingerprints, SIMD)
+Substrate: `https://github.com/AdaWorldAPI/ladybug-rs` (ladybug-contract: 8192-bit Containers)
 
 ## Golden Rule
 
@@ -16,245 +16,152 @@ If a Rust approach fails to compile or a crate is broken, you may fall back to P
 with numpy for that specific step ONLY. Document the failure and tag it `// TODO: port to Rust`.
 Everything else stays in Rust.
 
+## CRITICAL LESSONS FROM FIRST RUN
+
+### 1. Container size is 8192 bits (128 × u64), NOT 16384
+
+ladybug-contract uses `Container { words: [u64; 128] }` = 8192 bits.
+The VSACLIP code correctly uses this. Do NOT mix up with ladybug-rs Fingerprint (16384-bit).
+
+```rust
+use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS};
+// CONTAINER_BITS = 8192, CONTAINER_WORDS = 128
+```
+
+### 2. SimHash MUST be parallelized with rayon
+
+SimHash projection of 100K images took 25+ minutes single-threaded.
+Each image projection is independent. Use rayon:
+
+```rust
+use rayon::prelude::*;
+
+let containers: Vec<Container> = embeddings.par_iter()
+    .map(|emb| simhash(emb))
+    .collect();
+```
+
+This should reduce 25 min to 2-3 min on 8+ cores.
+
+### 3. CLIP Embeddings via Python fastembed (fallback accepted)
+
+Direct wget of Tiny ImageNet failed (SSL issues). The working approach:
+- Python `fastembed` library loads CLIP ViT-B/32
+- HuggingFace `datasets` library loads Tiny ImageNet images
+- Embeddings saved as binary: `[count: u32][dim: u32][f32 x count x dim]`
+- Labels saved as: `[count: u32][class_idx: u32 x count]`
+
+Rust loads these binary files directly. This is the accepted fallback because
+fastembed-rs ImageEmbedding for CLIP is less mature than the Python version.
+
+### 4. File size limits — split large binaries
+
+- `embeddings.bin` (100K x 512 x 4B = 195MB) exceeds GitHub 100MB limit
+- `containers.bin` (100K x 128 x 8B = 97MB) just under limit
+- Solution: only commit containers.bin + labels.bin, not embeddings.bin
+- Embeddings can be regenerated from the Python script
+
+### 5. The poc.rs binary was NOT pushed — commit it!
+
+The POC binary (`src/bin/poc.rs`) with the full pipeline exists only locally.
+It must be committed to GitHub. Also commit:
+- `.gitignore`
+- `scripts/embed_tiny_imagenet.py` (the Python embedding script)
+- `data/containers.bin` (if under 100MB)
+- `data/labels.bin` (small, ~400KB)
+
 ## Architecture in One Sentence
 
 ```
-Image → CLIP (fastembed-rs) → float32[512] → SimHash → Fingerprint[u64;256] → HDR POPCNT Sweep → Recognition
+Image -> CLIP (Python fastembed) -> float32[512] -> SimHash (Rust/rayon) -> Container[u64;128] -> HDR POPCNT Sweep -> Recognition
 ```
 
 The ONLY distance metric is **Hamming distance via POPCNT**. No cosine. No dot product. No floats in the hot path.
 
-## Repository Layout
+## Current Status (from first run)
 
+- [x] 16/16 unit tests pass (`cargo test --release`)
+- [x] Proof binary passes all tests
+- [x] Benchmark: 34.9x speedup at 10K containers (early exit vs full sweep)
+- [x] 100K CLIP embeddings computed (195MB, Python fastembed)
+- [x] AVX-512 confirmed available (avx512f, avx512bw, avx512vpopcntdq)
+- [ ] **SimHash projection of 100K** — needs rayon parallelization
+- [ ] **Resonance cascade on 100K containers** — not yet run
+- [ ] **Ground truth evaluation** — not yet run
+- [ ] **poc.rs not committed** — MUST PUSH
+- [ ] **containers.bin not saved** — generate + commit
+
+## IMMEDIATE TODO (resume from here)
+
+1. **Parallelize SimHash** — add `rayon::par_iter()` to batch projection in poc.rs
+2. **Run POC to completion** — SimHash -> Cascade -> Evaluation -> Print
+3. **Commit everything** — poc.rs, .gitignore, scripts/, containers.bin, labels.bin
+4. **Report results** — cluster purity, timing, speedup
+
+## Dataset — Tiny ImageNet 200
+
+**Direct download (may have SSL issues):**
+```bash
+wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
 ```
-VSACLIP/
-├── Cargo.toml                  # workspace root
-├── CLAUDE.md                   # THIS FILE — your instructions
-├── src/
-│   ├── lib.rs                  # HdrScore, ResonanceMatch, CascadeLayer
-│   ├── simhash.rs              # float32 → Fingerprint (random hyperplane LSH)
-│   ├── sweep.rs                # HDR POPCNT Sweep (3-stage Belichtungsmesser)
-│   ├── cascade.rs              # 3-layer resonance: Features→Parts→Objects
-│   ├── exposure.rs             # Belichtungsmesser config
-│   └── ingest.rs               # CLIP pipeline via fastembed-rs (optional feature)
-├── src/bin/
-│   ├── poc.rs                  # THE MAIN POC BINARY — run this
-│   └── download_data.rs        # Download Tiny ImageNet
-├── proof/
-│   └── hdr_proof.py            # Python proof (reference only, don't touch)
-├── reference/
-│   └── cam_graph.rs            # Original 8192-bit design (read-only reference)
-├── benches/
-│   └── sweep_bench.rs          # Criterion benchmarks
-└── data/                       # Tiny ImageNet lands here (gitignored)
+
+**Working approach — HuggingFace datasets (Python):**
+```python
+from datasets import load_dataset
+ds = load_dataset("zh-plus/tiny-imagenet", split="train")
+# ds[i]["image"] -> PIL Image, ds[i]["label"] -> int (0-199)
 ```
 
-## The POC — What To Build
-
-### Phase 1: Core (MUST compile, MUST pass tests)
-
-1. **`cargo build`** succeeds with ladybug-rs dependency
-2. **SimHash tests** pass: identical→0, similar→low, opposite→high Hamming distance
-3. **HDR Sweep test**: zero false negatives vs full sweep (planted matches in random sea)
-4. **Majority-vote superposition** preserves similarity (bundle of K similar → close to centroid)
-5. **Anti-resonance test**: inverted vector → Hamming distance > 90% of d
-
-### Phase 2: Ingest Pipeline
-
-6. **fastembed-rs** loads CLIP ViT-B/32 and embeds images → `Vec<f32>` (512-dim)
-7. **SimHash projects** each embedding → `Fingerprint` (16384-bit)
-8. Verify: two photos of dogs → low Hamming distance; dog vs car → high Hamming distance
-
-### Phase 3: Tiny ImageNet POC
-
-9. **Download** Tiny ImageNet (see dataset section below)
-10. Embed **all 100,000 train images** → 100K Fingerprints
-11. Run **resonance cascade**:
-    - Start with 0 seed features
-    - Expose all images; unmatched inputs become new L1 features
-    - After all images: superpose co-activated features → L2 parts
-    - Superpose co-activated parts → L3 objects
-12. **Ground truth test**: for each of 200 classes, check if images from that class
-    cluster in the same L3 object. Measure purity (% of dominant class per cluster).
-13. **Print results**: cluster purity per class, overall accuracy, timing
-
-### Phase 4: Benchmark
-
-14. `cargo bench` — Criterion benchmarks:
-    - `hdr_sweep` vs `full_sweep` at N=10K, 100K, 1M containers
-    - Measure actual speedup and verify zero false negatives
-    - Report instructions/container/query
-
-## Key Constants
-
-```rust
-// From ladybug-rs — do NOT redefine
-pub const FINGERPRINT_BITS: usize = 16_384;
-pub const FINGERPRINT_U64: usize = 256;  // 16384/64
-pub const FINGERPRINT_BYTES: usize = 2048; // 256×8
-
-// VSACLIP thresholds
-const HDR_HOT: f64 = 0.10;    // < 10% of d = blazing match
-const HDR_MID: f64 = 0.30;    // < 30% of d = solid match
-const HDR_COLD: f64 = 0.49;   // < 49% of d = weak signal (near noise floor)
-const SAFETY_MARGIN: f64 = 1.5; // for early-exit (zero false negatives)
-
-// SimHash seed — MUST be same everywhere for same projection
-const CLIP_SIMHASH_SEED: u64 = 0xADA0C11B_2025_0001;
-```
+**Dataset facts:**
+- 200 classes x 500 train images = 100,000 total
+- 64x64 RGB JPEG
+- 237MB zipped
+- Labels: WordNet synset IDs (n01443537 = goldfish, etc.)
 
 ## Dependencies
 
 ```toml
 [dependencies]
-# Substrate — provides Fingerprint, SIMD hamming, HDR cascade, BindSpace
-ladybug = { git = "https://github.com/AdaWorldAPI/ladybug-rs.git", branch = "main", default-features = false, features = ["simd"] }
-
-# Embeddings — CLIP ViT-B/32 via ONNX Runtime (pure Rust, no Python)
-fastembed = "5"
-
-# Image loading
-image = "0.25"
-
-# Arrow for zero-copy (ladybug uses Arrow internally)
-arrow = { version = "54", default-features = false, features = ["ffi"] }
-
-# Standard
+ladybug-contract = { git = "https://github.com/AdaWorldAPI/ladybug-rs.git", branch = "main" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 anyhow = "1"
-tracing = "0.1"
 rand = "0.8"
-rayon = "1"  # parallel ingest
+rayon = "1"           # CRITICAL for SimHash parallelization
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 ```
 
-### fastembed-rs Image Embedding Usage
-
-```rust
-use fastembed::{ImageEmbedding, ImageInitOptions, ImageEmbeddingModel};
-
-let model = ImageEmbedding::try_new(
-    ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
-        .with_show_download_progress(true),
-)?;
-
-let images = vec!["data/tiny-imagenet-200/train/n01443537/images/n01443537_0.JPEG"];
-let embeddings = model.embed(images, None)?;
-// embeddings[0] is Vec<f32> with 512 dimensions
-```
-
-## Dataset — Tiny ImageNet 200
-
-**Download URL:**
-```
-http://cs231n.stanford.edu/tiny-imagenet-200.zip
-```
-
-**Alternative mirror (Hugging Face):**
-```
-https://huggingface.co/datasets/zh-plus/tiny-imagenet
-```
-
-**Download script (`src/bin/download_data.rs`):**
-```bash
-# Manual download (fastest):
-mkdir -p data && cd data
-wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
-unzip tiny-imagenet-200.zip
-rm tiny-imagenet-200.zip
-```
-
-**Dataset structure after extraction:**
-```
-data/tiny-imagenet-200/
-├── train/                    # 100,000 images (200 classes × 500 images)
-│   ├── n01443537/           # goldfish
-│   │   └── images/
-│   │       ├── n01443537_0.JPEG    (64×64 RGB)
-│   │       ├── n01443537_1.JPEG
-│   │       └── ... (500 per class)
-│   ├── n01629819/           # European fire salamander
-│   └── ... (200 classes)
-├── val/                      # 10,000 images (50 per class)
-│   └── images/
-├── test/                     # 10,000 images (unlabeled)
-├── wnids.txt                # 200 WordNet IDs
-└── words.txt                # WordNet ID → human-readable labels
-```
-
-**Key facts:**
-- 200 classes, 500 train + 50 val per class
-- 64×64 pixels, RGB JPEG
-- 237 MB zipped, ~248 MB extracted
-- Ground truth labels via directory name (WordNet synset IDs)
-- `words.txt` maps e.g. `n01443537` → `goldfish, Carassius auratus`
-
 ## The 5 RISC Operations (from cam_graph.rs)
-
-Everything in the system reduces to these 5 operations on binary vectors:
 
 ```rust
 // OP 1: BIND — XOR. Self-inverse: bind(bind(a,b), b) = a
-fn bind(a: &Fingerprint, b: &Fingerprint) -> Fingerprint;
-
-// OP 2: BUNDLE — Majority vote. Superposition preserving similarity.
-fn bundle(words: &[&Fingerprint]) -> Fingerprint;
-
-// OP 3: MATCH — Hamming distance via POPCNT. THE query engine.
-fn distance(a: &Fingerprint, b: &Fingerprint) -> u32;
-
-// OP 4: PERMUTE — Bit rotation for role encoding (source/relation/target).
-fn permute(w: &Fingerprint, k: u32) -> Fingerprint;
-
-// OP 5: RANDOM — Deterministic PRNG expansion from seed.
-fn random(seed: u64) -> Fingerprint;
+// OP 2: BUNDLE — Majority vote. Superposition.
+// OP 3: MATCH — Hamming distance via POPCNT.
+// OP 4: PERMUTE — Bit rotation for roles.
+// OP 5: RANDOM — Deterministic PRNG expansion.
 ```
 
-**ladybug-rs provides these as:**
-- `Fingerprint::from_raw()`, `Fingerprint::from_content()`
-- `core::simd::hamming_distance()` — AVX-512/AVX2/NEON auto-dispatch
-- XOR via manual lane iteration (or use `search::hdr_cascade` operations)
-
-## Belichtungsmesser — The Early Exit
-
-Three-stage progressive bit-width expansion. Like a camera light meter:
+## Belichtungsmesser — Early Exit
 
 ```
-Stage 1 — Spot:           64 bits  (1 u64)   → eliminates ~95%
-Stage 2 — Center-weight: 512 bits  (8 u64)   → eliminates ~90% of survivors
-Stage 3 — Matrix:      16384 bits (256 u64)   → exact Hamming distance
+Stage 1 — Spot:          64 bits (1 u64)    -> eliminates ~80-95%
+Stage 2 — Center:       512 bits (8 u64)    -> eliminates ~80-90% of survivors
+Stage 3 — Matrix:      8192 bits (128 u64)  -> exact Hamming
 
-Each stage threshold = (total_threshold) × (stage_bits / total_bits) × safety_margin
-Safety margin = 1.5 guarantees ZERO false negatives (proven).
+threshold_stage = total_threshold x (stage_bits / 8192) x 1.5
+Safety margin 1.5x = ZERO false negatives (proven, 16/16 tests pass)
 ```
 
-## HDR Scoring
-
-Each match gets an HDR score (0-6):
+## HDR Scoring (0-6)
 
 ```
-hot  = 3 if dist < 10% of d   (blazing resonance)
-mid  = 2 if dist < 30% of d   (solid match)
-cold = 1 if dist < 49% of d   (weak signal)
-total = hot + mid + cold       (0 = noise, 6 = perfect match)
-```
-
-Anti-resonance (inhibition): if dist > 90% of d, the vector is an ANTI-match.
-Free lateral inhibition without extra architecture.
-
-## Resonance Cascade
-
-```
-L1 Features:  threshold = 30% of d   (edges, textures, colors)
-L2 Parts:     threshold = 35% of d   (eyes, wings, wheels)
-L3 Objects:   threshold = 40% of d   (bird, car, house)
-
-Between layers: majority-vote superposition of top-K activated containers.
-Growth: if nothing resonates → input becomes a new container (organic feature discovery).
+hot  = 3 if dist < 10% x 8192 =  819
+mid  = 2 if dist < 30% x 8192 = 2458
+cold = 1 if dist < 49% x 8192 = 4014
+total = hot + mid + cold
+Anti-resonance: dist > 90% x 8192 = 7373 -> inhibition
 ```
 
 ## What Success Looks Like
@@ -265,75 +172,31 @@ $ cargo run --release --bin poc
 VSACLIP Proof-of-Concept
 ========================
 
-[1/6] Loading CLIP ViT-B/32...                    ✓ (2.1s)
-[2/6] Scanning Tiny ImageNet train/...             ✓ 100,000 images found
-[3/6] Embedding + SimHash projection...            ✓ 100,000 fingerprints (47s)
-[4/6] Running resonance cascade...                 ✓ L1: 2,847 features, L2: 412 parts, L3: 53 objects
-[5/6] Ground truth evaluation...
-      Cluster purity: 71.3% (chance = 0.5%)
-      Top-5 accuracy: 89.2%
-      Classes perfectly separated: 142/200
-[6/6] Sweep benchmark (N=100,000)...
-      Full sweep:  4,267 μs/query
-      HDR sweep:      68 μs/query  (62.7× speedup)
+[1/6] Loading embeddings...                        ok 100,000 x 512
+[2/6] SimHash projection (parallel)...             ok 100,000 containers (2.3s)
+[3/6] Running resonance cascade...                 ok L1: ~3K, L2: ~400, L3: ~50
+[4/6] Ground truth evaluation...
+      Cluster purity: 40-70% (chance = 0.5%)
+      Top-5 accuracy: 60-85%
+[5/6] Sweep benchmark (N=100,000)...
+      Full sweep:  4.3 ms/query
+      HDR sweep:   68 us/query  (63x speedup)
       False negatives: 0
+[6/6] Saving containers.bin...                     ok 97 MB
 
-Done. No training. No GPU. No numpy.
+No training. No GPU. No numpy in the hot path.
 ```
-
-## Build & Run
-
-```bash
-# Clone
-git clone https://github.com/AdaWorldAPI/VSACLIP.git
-cd VSACLIP
-
-# Download dataset
-mkdir -p data && cd data
-wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
-unzip tiny-imagenet-200.zip && rm tiny-imagenet-200.zip
-cd ..
-
-# Build & test
-cargo build --release
-cargo test --release
-
-# Run POC
-cargo run --release --bin poc
-
-# Benchmarks
-cargo bench
-```
-
-## Failure Modes & Fallbacks
-
-| Problem | Action |
-|---------|--------|
-| ladybug-rs won't compile | Check Rust 1.88+. Try `default-features = false, features = ["simd"]` |
-| fastembed model download fails | Pre-download ONNX model from HuggingFace: `Qdrant/clip-ViT-B-32-vision` |
-| fastembed image embedding crashes | **FALLBACK**: use Python `pip install fastembed` to pre-compute embeddings as `.bin` files, load in Rust as raw `[u64;256]` |
-| SimHash projection quality is bad | Try more hyperplanes, different seed, or use Jina CLIP v2 (1024-dim) |
-| Resonance cascade doesn't cluster | Lower L1 threshold to 25%, increase exposure passes |
-| Cluster purity < 30% | The SimHash projection may lose too much info. **FALLBACK**: Use numpy + sklearn to verify CLIP embeddings have structure before SimHash |
 
 ## Anti-Patterns — DO NOT
 
-- ❌ Do NOT use cosine similarity anywhere in the hot path
-- ❌ Do NOT use numpy unless Rust genuinely fails (document why)
-- ❌ Do NOT use PyTorch, TensorFlow, or any Python ML framework
-- ❌ Do NOT add a training loop — this system learns by exposure, not gradient descent
-- ❌ Do NOT use HashMap for fingerprint lookup — it's POPCNT scan or nothing
-- ❌ Do NOT store labels in containers — labels are for evaluation only
-- ❌ Do NOT modify `proof/hdr_proof.py` — it's the reference implementation
-- ❌ Do NOT modify `reference/cam_graph.rs` — it's the architectural DNA
-
-## GitHub Authentication
-
-```bash
-# For private repo access (ladybug-rs)
-# Set GH_TOKEN env var or use `gh auth login`
-git config --global credential.helper store
-```
+- Do NOT use cosine similarity in the hot path
+- Do NOT use numpy unless Rust genuinely fails (document why)
+- Do NOT run SimHash single-threaded on 100K+ images (use rayon)
+- Do NOT try to push >100MB files to GitHub without LFS
+- Do NOT use HashMap for fingerprint lookup — POPCNT scan only
+- Do NOT store labels in containers — labels are for evaluation only
+- Do NOT modify `proof/hdr_proof.py` or `reference/cam_graph.rs`
+- Do NOT confuse Container (8192-bit) with Fingerprint (16384-bit)
 
 ## Philosophy
 
