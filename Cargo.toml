@@ -20,6 +20,14 @@ path = "src/bin/proof.rs"
 name = "vsaclip-bench"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "poc"
+path = "src/bin/poc.rs"
+
+[[bin]]
+name = "download-data"
+path = "src/bin/download_data.rs"
+
 # =============================================================================
 # FEATURES
 # =============================================================================
@@ -42,6 +50,7 @@ fastembed = { version = "4", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
 
 rand = "0.8"
+rayon = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

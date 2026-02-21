@@ -4,8 +4,7 @@
 
 use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS};
 use vsaclip::hdr::HdrConfig;
-use vsaclip::sweep::{hdr_sweep, full_sweep, SweepConfig};
-use vsaclip::container_ext::{hamming_early_exit, is_anti_resonant};
+use vsaclip::sweep::{hdr_sweep, SweepConfig};
 use vsaclip::ingest::simhash;
 
 use std::time::Instant;
@@ -215,7 +214,7 @@ fn test_instruction_count() -> bool {
     println!("═══════════════════════════════════════════════");
 
     for n in [10_000u64, 100_000, 1_000_000, 10_000_000] {
-        let (full, early, speedup) = vsaclip::exposure::theoretical_instructions(n, 0.30, 1.5);
+        let (_full, early, speedup) = vsaclip::exposure::theoretical_instructions(n, 0.30, 1.5);
         let us_early = early as f64 / 3_000.0;
         let us_avx = early as f64 / 24_000.0;
         println!("\n  N={:>12} | early: {:>8.0} μs | AVX-512: {:>6.0} μs | {:.0}× speedup",

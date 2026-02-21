@@ -1,0 +1,10 @@
+/target
+__pycache__
+*.pyc
+.DS_Store
+
+# Data — large files excluded, but keep the container database
+/data/tiny-imagenet-200/
+/data/embeddings.bin
+/data/embeddings_test.bin
+/data/labels_test.txt
