@@ -36,6 +36,10 @@ pub mod exposure;
 pub mod ingest;
 #[cfg(feature = "rustynum")]
 pub mod simd_bridge;
+#[cfg(feature = "rustynum")]
+pub mod blackboard_sweep;
+#[cfg(any(feature = "lance-io", feature = "datafusion-scan"))]
+pub mod storage;
 
 // Re-export core types from ladybug-contract
 pub use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS, CONTAINER_BYTES};
