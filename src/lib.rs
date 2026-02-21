@@ -34,6 +34,8 @@ pub mod wide_sweep;
 pub mod cascade;
 pub mod exposure;
 pub mod ingest;
+#[cfg(feature = "rustynum")]
+pub mod simd_bridge;
 
 // Re-export core types from ladybug-contract
 pub use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS, CONTAINER_BYTES};
