@@ -254,3 +254,166 @@ No training. No GPU. No numpy in the hot path.
 > Containers are the weights. POPCNT is the activation. XOR is learning.
 > HDR stacking is attention. Early exit is the light meter.
 > There is no training. There is only resonance.
+
+---
+
+## EXPERIMENT: X-Trans Projection (Break the 1.22x Barrier)
+
+### The Problem
+
+Current SimHash uses random hyperplanes — equivalent to a **Bayer filter** in camera sensors.
+Every 2x2 block repeats. Massive redundancy. When two regular grids interact, you get moiré —
+aliasing that destroys information. Our version of "moiré" is the collapsed distance distribution:
+intra-class 20.3%, inter-class 24.6%, separation ratio only 1.22x. The bits are correlated,
+measuring the same directions over and over.
+
+### The Insight: Fujifilm X-Trans
+
+Fujifilm solved moiré by replacing the 2x2 Bayer grid with a **6x6 non-periodic pattern**.
+Every row and column sees all three colors. The aperiodicity eliminates interference without
+needing a low-pass filter (which blurs = loses information). Result: sharper images from the
+same sensor resolution.
+
+**Our equivalence:**
+
+```
+Camera sensor    →  SimHash projection
+Bayer 2x2 grid   →  i.i.d. random hyperplanes (correlated, redundant)
+X-Trans 6x6      →  Structured non-periodic projection (maximally independent bits)
+Moiré artifacts   →  Collapsed distance distribution (1.22x)
+Low-pass filter   →  Not needed if projection has no aliasing
+```
+
+### Three Approaches to Try (in order of expected impact)
+
+#### Approach 1: Golden Angle Spiral Hyperplanes
+
+Instead of random hyperplanes, generate them on a **golden angle spiral** in embedding space.
+The golden angle (137.508 degrees) produces maximally non-repeating angular coverage —
+exactly like sunflower seed placement. No two hyperplanes cluster.
+
+```rust
+const PHI: f64 = 1.618033988749895; // golden ratio
+const GOLDEN_ANGLE: f64 = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()); // ~2.399963 rad
+
+fn golden_hyperplane(bit_idx: usize, dim: usize) -> Vec<f32> {
+    let mut plane = vec![0.0f32; dim];
+    for d in 0..dim {
+        // Golden angle rotation in (bit_idx, d) space
+        let angle = (bit_idx as f64 * GOLDEN_ANGLE) + (d as f64 * PHI);
+        plane[d] = angle.cos() as f32;
+    }
+    // Normalize
+    let norm: f32 = plane.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for x in &mut plane { *x /= norm; }
+    plane
+}
+```
+
+Each bit measures a genuinely different direction. Expected: wider distance distribution,
+better separation.
+
+#### Approach 2: Cross-Bind Projection (XOR Differential)
+
+Instead of `bit_i = sign(dot(emb, h_i))`, use **bound pairs**:
+
+```rust
+// Cross-bind: bit_i = sign(dot(emb, h_i)) XOR sign(dot(emb, h_j))
+// where j = (i * PHI) mod CONTAINER_BITS
+// Each bit encodes the DIFFERENCE between two projections
+// This is a differential measurement — like edge detection
+fn cross_bind_simhash(embedding: &[f32], seed: u64) -> Container {
+    let mut result = Container::zero();
+    for bit in 0..CONTAINER_BITS {
+        let j = ((bit as f64 * PHI) as usize) % CONTAINER_BITS;
+        let sign_i = dot_hyperplane(embedding, bit, seed) >= 0.0;
+        let sign_j = dot_hyperplane(embedding, j, seed) >= 0.0;
+        if sign_i ^ sign_j {  // XOR = differential
+            result.words[bit / 64] |= 1u64 << (bit % 64);
+        }
+    }
+    result
+}
+```
+
+Each bit captures a **relationship between two directions**, not just one direction.
+The golden-ratio pairing ensures no two crosses overlap. Information per bit is higher.
+This is like edge detection vs pixel sampling — edges carry more discriminative information.
+
+#### Approach 3: Permute-Bind Multi-View (Holographic)
+
+Use ladybug's native PERMUTE + BIND to create multiple "views" and superpose them:
+
+```rust
+// Take K different projections of the same embedding
+// Permute each by a different offset
+// XOR-bind them together into one Container
+// The result encodes K simultaneous views holographically
+fn holographic_simhash(embedding: &[f32], seed: u64) -> Container {
+    let view1 = simhash(embedding, seed);
+    let view2 = simhash(embedding, seed ^ 0xDEAD);
+    let view3 = simhash(embedding, seed ^ 0xBEEF);
+
+    let p1 = view1;  // identity
+    let p2 = Container::permute(&view2, 1);  // rotate by 1 word
+    let p3 = Container::permute(&view3, 2);  // rotate by 2 words
+
+    // XOR-bind all views: holographic superposition
+    let mut result = Container::zero();
+    for i in 0..CONTAINER_WORDS {
+        result.words[i] = p1.words[i] ^ p2.words[i] ^ p3.words[i];
+    }
+    result
+}
+```
+
+This is the full X-Trans approach: multiple color channels (views) at different
+spatial offsets (permutations), bound into a single representation. Each word in the
+Container contains information from all three views simultaneously — just like
+X-Trans puts R, G, B in every row and column.
+
+### Measurement
+
+For each approach, measure:
+
+```
+1. Intra-class mean Hamming distance (currently 20.3%)
+2. Inter-class mean Hamming distance (currently 24.6%)
+3. Separation ratio (currently 1.22x) — TARGET: > 1.5x
+4. Distance distribution width (stddev of intra vs inter)
+5. Overlap integral between intra and inter distributions
+6. Cluster purity after resonance cascade
+```
+
+### Why This Should Work (Information Theory)
+
+Random hyperplanes: each bit has ~1 bit of information about 1 random direction.
+With 8192 bits and 512 dims, you get ~16x oversampling of the same space.
+Most bits are redundant. The effective dimensionality is << 8192.
+
+Golden/cross/holographic: each bit captures information that is maximally
+UNLIKE the information in other bits. The effective dimensionality approaches 8192.
+More independent bits = wider distance distribution = better separation.
+
+The Bayer-to-X-Trans improvement in cameras is roughly 15-25% more effective resolution
+from the same pixel count. We should expect a similar jump in effective Hamming discrimination.
+
+### Integration with Existing Code
+
+The projection change is ISOLATED to `ingest.rs` and `simhash()`. Everything downstream
+(sweep, cascade, evaluation) stays exactly the same. The Belichtungsmesser, early exit,
+HDR scoring — all still work. Only the projection function changes.
+
+```rust
+// In ingest.rs — add these as alternatives:
+pub fn simhash_golden(embedding: &[f32], seed: u64) -> Container;
+pub fn simhash_crossbind(embedding: &[f32], seed: u64) -> Container;
+pub fn simhash_holographic(embedding: &[f32], seed: u64) -> Container;
+
+// In poc.rs — compare all four:
+let containers_random = batch_simhash(embeddings, simhash);
+let containers_golden = batch_simhash(embeddings, simhash_golden);
+let containers_cross  = batch_simhash(embeddings, simhash_crossbind);
+let containers_holo   = batch_simhash(embeddings, simhash_holographic);
+// Measure separation ratio for each
+```
