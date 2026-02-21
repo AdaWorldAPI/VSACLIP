@@ -11,9 +11,8 @@
 //! - Speedup: ~63× for random data
 
 use ladybug_contract::container::{Container, CONTAINER_WORDS, CONTAINER_BITS};
-use crate::container_ext::hamming_early_exit;
 use crate::hdr::{HdrConfig, HdrDistribution};
-use crate::{HdrScore, ResonanceMatch};
+use crate::ResonanceMatch;
 
 /// Configuration for the sweep engine
 #[derive(Debug, Clone)]
