@@ -28,6 +28,14 @@ path = "src/bin/poc.rs"
 name = "download-data"
 path = "src/bin/download_data.rs"
 
+[[bin]]
+name = "xtrans-experiment"
+path = "src/bin/xtrans_experiment.rs"
+
+[[bin]]
+name = "thirds-experiment"
+path = "src/bin/thirds_experiment.rs"
+
 # =============================================================================
 # FEATURES
 # =============================================================================
