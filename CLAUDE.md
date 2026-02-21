@@ -82,26 +82,72 @@ Image -> CLIP float32[512] (one-time pre-process) -> SimHash (Rust/rayon) -> Con
 The CLIP embedding is a one-time translation step. ALL Hamming work is Rust.
 No Python in the hot path. No Python in SimHash. No Python in sweep or cascade.
 
-## Current Status (from first run)
+## Current Status (from first run — all Rust)
 
 - [x] 16/16 unit tests pass (`cargo test --release`)
 - [x] Proof binary passes all tests
 - [x] Benchmark: 34.9x speedup at 10K containers (early exit vs full sweep)
-- [x] 100K CLIP embeddings computed (195MB binary, one-time pre-process)
-- [x] SimHash projection working in Rust (needs rayon for speed)
-- [x] AVX-512 confirmed available (avx512f, avx512bw, avx512vpopcntdq)
-- [ ] **SimHash projection of 100K** — needs rayon parallelization
-- [ ] **Resonance cascade on 100K containers** — not yet run
-- [ ] **Ground truth evaluation** — not yet run
-- [ ] **poc.rs not committed** — MUST PUSH
-- [ ] **containers.bin not saved** — generate + commit
+- [x] 100K CLIP float embeddings computed (195MB binary, one-time pre-process)
+- [x] SimHash projection working in Rust (was single-threaded, rayon fix done locally)
+- [x] AVX-512 confirmed (avx512f, avx512bw, avx512vpopcntdq)
+- [x] POC ran end-to-end: intra=20.3%, inter=24.6%, ratio=1.22x
+- [x] rayon added to Cargo.toml (LOCAL ONLY — not committed)
+- [x] batch_simhash parallelized with par_iter (LOCAL ONLY — not committed)
+- [ ] **poc.rs NOT committed** — must recreate and push
+- [ ] **Thresholds need tuning** — 30% is too loose, need 22-25%
+- [ ] **Cascade with tuned thresholds** — not yet run with correct settings
+- [ ] **Ground truth purity** — not yet measured with correct thresholds
+- [ ] **.gitignore NOT committed**
 
 ## IMMEDIATE TODO (resume from here)
 
-1. **Parallelize SimHash** — add `rayon::par_iter()` to batch projection in poc.rs
-2. **Run POC to completion** — SimHash -> Cascade -> Evaluation -> Print
-3. **Commit everything** — poc.rs, .gitignore, scripts/, containers.bin, labels.bin
-4. **Report results** — cluster purity, timing, speedup
+1. **Add rayon to Cargo.toml** — `rayon = "1"` (was added locally but not committed)
+2. **Parallelize batch_simhash** in `ingest.rs` with `par_iter()` (was done locally, not committed)
+3. **Create/commit poc.rs** — the main binary that runs the full pipeline
+4. **Tune thresholds** — see data distribution findings below
+5. **Run cascade with tuned thresholds** — aim for the 22-25% sweet spot
+6. **Commit everything** — poc.rs, .gitignore, Cargo.toml with rayon, updated ingest.rs
+
+## CRITICAL DATA FROM FIRST FULL RUN
+
+The POC ran end-to-end on 100K images. Key findings:
+
+```
+SimHash Quality (8192-bit Containers from 512-dim CLIP):
+  Intra-class mean Hamming: 20.3% of d  (~1664 bits)
+  Inter-class mean Hamming: 24.6% of d  (~2015 bits)
+  Separation ratio: 1.22x
+```
+
+This means:
+- The distributions OVERLAP significantly
+- A 30% threshold captures almost everything (too loose) -> 64 L1 clusters, 1 L3 cluster
+- Thresholds MUST be in the 20-25% range (between intra and inter means)
+- The sweet spot for L1 is ~22%, for L2 ~23%, for L3 ~24%
+
+**Recommended thresholds (from data):**
+```rust
+const L1_THRESHOLD_PCT: f64 = 0.22;  // tight: between intra(20.3%) and inter(24.6%)
+const L2_THRESHOLD_PCT: f64 = 0.23;
+const L3_THRESHOLD_PCT: f64 = 0.24;
+```
+
+**The cascade needs adaptive thresholding.** Consider computing percentiles of the
+actual distance distribution and setting thresholds at p25-p50 of intra-class distances.
+
+## Performance from first run
+
+```
+SimHash 100K images:
+  Single-threaded: 30+ minutes (killed)
+  Rayon parallel (16 cores): ~2 minutes (estimated, was about to run)
+  
+Proof benchmarks:
+  HDR Sweep speedup: 34.9x at 10K containers
+  All 16 tests: PASS
+  
+Containers cached: second run loads from containers.bin (instant)
+```
 
 ## Dataset — Tiny ImageNet 200
 
