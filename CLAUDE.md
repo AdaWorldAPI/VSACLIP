@@ -43,16 +43,19 @@ let containers: Vec<Container> = embeddings.par_iter()
 
 This should reduce 25 min to 2-3 min on 8+ cores.
 
-### 3. CLIP Embeddings via Python fastembed (fallback accepted)
+### 3. CLIP float embeddings are a pre-processing step
 
-Direct wget of Tiny ImageNet failed (SSL issues). The working approach:
-- Python `fastembed` library loads CLIP ViT-B/32
-- HuggingFace `datasets` library loads Tiny ImageNet images
-- Embeddings saved as binary: `[count: u32][dim: u32][f32 x count x dim]`
-- Labels saved as: `[count: u32][class_idx: u32 x count]`
+The pipeline is:
+1. **Pre-process (once)**: CLIP ViT-B/32 generates float32[512] per image
+   - Used Python fastembed + HuggingFace datasets to load Tiny ImageNet
+   - Saved as binary: `[count: u32][dim: u32][f32 x count x dim]`
+   - This is a ONE-TIME translator step, not part of the architecture
+2. **Everything else is Rust**: SimHash, POPCNT sweep, cascade, evaluation
+   - Rust loads the binary embeddings, projects via SimHash, sweeps via Hamming
+   - The entire hot path is Rust + SIMD, zero Python
 
-Rust loads these binary files directly. This is the accepted fallback because
-fastembed-rs ImageEmbedding for CLIP is less mature than the Python version.
+The CLIP model is just a TRANSLATOR from pixel-space to vector-space.
+Once translated, the float vectors become binary Containers and never touch floats again.
 
 ### 4. File size limits — split large binaries
 
@@ -73,17 +76,19 @@ It must be committed to GitHub. Also commit:
 ## Architecture in One Sentence
 
 ```
-Image -> CLIP (Python fastembed) -> float32[512] -> SimHash (Rust/rayon) -> Container[u64;128] -> HDR POPCNT Sweep -> Recognition
+Image -> CLIP float32[512] (one-time pre-process) -> SimHash (Rust/rayon) -> Container[u64;128] -> HDR POPCNT Sweep (Rust/SIMD) -> Recognition
 ```
 
-The ONLY distance metric is **Hamming distance via POPCNT**. No cosine. No dot product. No floats in the hot path.
+The CLIP embedding is a one-time translation step. ALL Hamming work is Rust.
+No Python in the hot path. No Python in SimHash. No Python in sweep or cascade.
 
 ## Current Status (from first run)
 
 - [x] 16/16 unit tests pass (`cargo test --release`)
 - [x] Proof binary passes all tests
 - [x] Benchmark: 34.9x speedup at 10K containers (early exit vs full sweep)
-- [x] 100K CLIP embeddings computed (195MB, Python fastembed)
+- [x] 100K CLIP embeddings computed (195MB binary, one-time pre-process)
+- [x] SimHash projection working in Rust (needs rayon for speed)
 - [x] AVX-512 confirmed available (avx512f, avx512bw, avx512vpopcntdq)
 - [ ] **SimHash projection of 100K** — needs rayon parallelization
 - [ ] **Resonance cascade on 100K containers** — not yet run
