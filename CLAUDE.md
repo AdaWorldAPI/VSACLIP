@@ -82,71 +82,104 @@ Image -> CLIP float32[512] (one-time pre-process) -> SimHash (Rust/rayon) -> Con
 The CLIP embedding is a one-time translation step. ALL Hamming work is Rust.
 No Python in the hot path. No Python in SimHash. No Python in sweep or cascade.
 
-## Current Status (from first run — all Rust)
+## Current Status — POC COMPLETE
 
-- [x] 16/16 unit tests pass (`cargo test --release`)
-- [x] Proof binary passes all tests
-- [x] Benchmark: 34.9x speedup at 10K containers (early exit vs full sweep)
-- [x] 100K CLIP float embeddings computed (195MB binary, one-time pre-process)
-- [x] SimHash projection working in Rust (was single-threaded, rayon fix done locally)
-- [x] AVX-512 confirmed (avx512f, avx512bw, avx512vpopcntdq)
-- [x] POC ran end-to-end: intra=20.3%, inter=24.6%, ratio=1.22x
-- [x] rayon added to Cargo.toml (LOCAL ONLY — not committed)
-- [x] batch_simhash parallelized with par_iter (LOCAL ONLY — not committed)
-- [ ] **poc.rs NOT committed** — must recreate and push
-- [ ] **Thresholds need tuning** — 30% is too loose, need 22-25%
-- [ ] **Cascade with tuned thresholds** — not yet run with correct settings
-- [ ] **Ground truth purity** — not yet measured with correct thresholds
-- [ ] **.gitignore NOT committed**
+Branch: `claude/vsaclip-hamming-recognition-y0b94` (14 files, 104K insertions)
 
-## IMMEDIATE TODO (resume from here)
-
-1. **Add rayon to Cargo.toml** — `rayon = "1"` (was added locally but not committed)
-2. **Parallelize batch_simhash** in `ingest.rs` with `par_iter()` (was done locally, not committed)
-3. **Create/commit poc.rs** — the main binary that runs the full pipeline
-4. **Tune thresholds** — see data distribution findings below
-5. **Run cascade with tuned thresholds** — aim for the 22-25% sweet spot
-6. **Commit everything** — poc.rs, .gitignore, Cargo.toml with rayon, updated ingest.rs
-
-## CRITICAL DATA FROM FIRST FULL RUN
-
-The POC ran end-to-end on 100K images. Key findings:
+### Actual Results (100K Tiny ImageNet, 200 classes, 8192-bit Container)
 
 ```
-SimHash Quality (8192-bit Containers from 512-dim CLIP):
-  Intra-class mean Hamming: 20.3% of d  (~1664 bits)
-  Inter-class mean Hamming: 24.6% of d  (~2015 bits)
-  Separation ratio: 1.22x
+L1 Features:          4,971
+L2 Parts:             1,812
+L3 Objects:             481
+Cluster purity:        7.7%  (15x above 0.5% chance)
+Single-class clusters:  204
+Images assigned:     99,607 / 100,000
+HDR sweep speedup:      2x  (zero false negatives)
+SimHash (rayon, 16c):  221s  (was 30+ min single-threaded)
+All tests:            16/16 passing
 ```
 
-This means:
-- The distributions OVERLAP significantly
-- A 30% threshold captures almost everything (too loose) -> 64 L1 clusters, 1 L3 cluster
-- Thresholds MUST be in the 20-25% range (between intra and inter means)
-- The sweet spot for L1 is ~22%, for L2 ~23%, for L3 ~24%
+### Distance Distribution (the bottleneck)
 
-**Recommended thresholds (from data):**
+```
+Intra-class mean:  20.3% of d  (~1664 bits)
+Inter-class mean:  24.6% of d  (~2015 bits)
+Separation ratio:  1.22x        <- THIS IS THE BOTTLENECK
+```
+
+### What is pushed to GitHub
+
+- [x] `src/bin/poc.rs` — full pipeline binary
+- [x] `src/bin/download_data.rs` — dataset download
+- [x] `src/ingest.rs` — rayon parallel SimHash + I/O
+- [x] `scripts/embed_hf.py` — Python CLIP fallback
+- [x] `scripts/embed_images.py` — local image embedding
+- [x] `data/containers.bin` — 98MB pre-computed database (100K containers)
+- [x] `data/labels.txt` — 200 class labels
+- [x] `benches/hdr_sweep.rs` — multi-scale benchmarks
+- [x] `Cargo.toml` — rayon + binary definitions
+- [x] 16/16 tests passing, all warnings cleaned
+
+## NEXT PHASE: Break the 1.22x Barrier
+
+The POC works. 7.7% purity = 15x above chance = the architecture is sound.
+But 1.22x separation is the ceiling. Two levers to pull:
+
+### Lever 1: Switch to 16,384-bit Fingerprint (ladybug-rs)
+
+ladybug-rs main crate has `Fingerprint` (256 x u64 = 16,384 bits).
+ladybug-contract has `Container` (128 x u64 = 8,192 bits).
+Doubling the bits = doubling the SimHash hyperplanes = better fidelity.
+
 ```rust
-const L1_THRESHOLD_PCT: f64 = 0.22;  // tight: between intra(20.3%) and inter(24.6%)
-const L2_THRESHOLD_PCT: f64 = 0.23;
-const L3_THRESHOLD_PCT: f64 = 0.24;
+// SWITCH FROM:
+use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS};
+// TO:
+use ladybug::core::fingerprint::Fingerprint;
+// Fingerprint is 16,384 bits (256 x u64)
 ```
 
-**The cascade needs adaptive thresholding.** Consider computing percentiles of the
-actual distance distribution and setting thresholds at p25-p50 of intra-class distances.
+This is the simplest change and should improve separation directly.
 
-## Performance from first run
+### Lever 2: X-Trans Structured Projection (see experiment section below)
+
+Replace random hyperplanes with golden-angle / cross-bind / holographic projection.
+Maximally independent bits instead of redundant random sampling.
+
+### Lever 3: Use native ladybug HdrIndex
+
+ladybug-rs `hdr_cascade.rs` already has:
+- `belichtung_meter()` — 7-point at `[0, 37, 79, 127, 167, 211, 251]`
+- `MexicanHat` — excitation/inhibition curves
+- `HdrIndex` — multi-resolution sketch cascade
+- `QualityTracker` — adaptive threshold from stddev history
+
+Currently VSACLIP reimplements a simpler 3-stage version. Switch to native API.
+
+### Lever 4: Better CLIP Model
+
+Current: CLIP ViT-B/32 (512-dim, 2021). Alternatives:
+- Jina CLIP v2 (1024-dim, 2024) — 2x embedding dimensions
+- Unicom ViT-B-32 (512-dim, 2023) — better embedding structure
+- Larger model = more information to project
+
+### Priority Order
+
+1. X-Trans projection (highest expected impact, same Container size)
+2. 16,384-bit Fingerprint (double bits, simple change)
+3. Both combined (X-Trans + 16K bits)
+4. Native HdrIndex (better cascade, less code)
+5. Better CLIP model (external dependency)
+
+## Performance Numbers
 
 ```
-SimHash 100K images:
-  Single-threaded: 30+ minutes (killed)
-  Rayon parallel (16 cores): ~2 minutes (estimated, was about to run)
-  
-Proof benchmarks:
-  HDR Sweep speedup: 34.9x at 10K containers
-  All 16 tests: PASS
-  
-Containers cached: second run loads from containers.bin (instant)
+SimHash 100K (rayon, 16 cores):  221 seconds
+HDR sweep speedup:               2x at 100K containers
+Early exit (proof, 10K):         34.9x speedup
+All 16 unit tests:               PASS
+Zero false negatives:            Confirmed at all scales
 ```
 
 ## Dataset — Tiny ImageNet 200
