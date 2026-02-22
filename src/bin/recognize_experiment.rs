@@ -4,18 +4,16 @@
 //! containers (data/containers.bin) to compare:
 //!
 //! 1. HAMMING BRUTE (old): SimHash 8192-bit → Hamming distance → nearest-neighbor
-//! 2. PROJECTION READOUT: Gram-Schmidt projections as class scores (new)
-//! 3. INDEPENDENT READOUT: Non-orthogonal projections
-//! 4. TWO-STAGE: Hamming shortlist + Gram-Schmidt re-rank
+//! 2. GRAM-SCHMIDT READOUT: project query → GS projections as class scores
+//! 3. INDEPENDENT READOUT: project query → independent dot products
 //!
-//! The key insight: learn path uses Gram-Schmidt, so recognize path MUST too.
-//! Same operation, different interpretation of the output.
+//! Key insight: learn path uses Gram-Schmidt, recognize path must too.
 //!
 //! Run: cargo run --release --bin recognize-experiment
 
 use ladybug_contract::container::Container;
 use vsaclip::ingest;
-use rustynum_oracle::recognize::Recognizer;
+use rustynum_oracle::recognize::{Recognizer, Projector64K};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,9 +32,7 @@ fn main() {
     let containers_path = data_dir.join("containers.bin");
     let labels_path = data_dir.join("labels.txt");
 
-    // =========================================================================
     // Load data
-    // =========================================================================
     let t = Instant::now();
     print!("  Loading embeddings.bin ...   ");
     let (embeddings, dim) = ingest::load_embeddings(&embeddings_path)
@@ -53,9 +49,7 @@ fn main() {
     assert_eq!(embeddings.len(), labels.len());
     assert_eq!(containers.len(), labels.len());
 
-    // =========================================================================
-    // Build class → sample index map
-    // =========================================================================
+    // Build class map
     let mut class_map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, label) in labels.iter().enumerate() {
         class_map.entry(label.clone()).or_default().push(i);
@@ -64,168 +58,180 @@ fn main() {
     classes.sort_by(|a, b| a.0.cmp(&b.0));
     let num_classes = classes.len();
 
-    // =========================================================================
-    // Train/test split
-    // =========================================================================
-    let train_per_class = 400;
-    let test_per_class = 100;
+    let train_per_class = 20; // fast: 20 train samples
+    let test_per_class = 50;  // 50 test per class = 10K test
 
-    let test_samples_full: Vec<(usize, usize)> = classes.iter().enumerate()
+    let test_samples: Vec<(usize, usize)> = classes.iter().enumerate()
         .flat_map(|(c, (_, indices))| {
             indices.iter().skip(train_per_class).take(test_per_class)
                 .map(move |&idx| (idx, c))
         })
         .collect();
+    let total_test = test_samples.len();
 
-    println!("  Classes: {}, train: {}/class, test: {} total",
-             num_classes, train_per_class, test_samples_full.len());
+    println!("  {} classes, {} train/class, {} test samples", num_classes, train_per_class, total_test);
     println!();
 
     // =========================================================================
-    // METHOD 1: Old Binary Hamming (baseline, from containers.bin)
+    // Baseline: Binary Hamming (8192-bit, 400 train samples for majority-bundle)
     // =========================================================================
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  METHOD 1: Binary Hamming — 8192-bit nearest-neighbor");
+    println!("  BASELINE: Binary Hamming — 8192-bit nearest-neighbor");
     println!("═══════════════════════════════════════════════════════════════════");
 
     let t = Instant::now();
-    let mut class_prototypes: Vec<Container> = Vec::with_capacity(num_classes);
-    for (_, indices) in &classes {
-        let train_containers: Vec<&Container> = indices.iter()
-            .take(train_per_class)
-            .map(|&i| &containers[i])
-            .collect();
-        class_prototypes.push(Container::bundle(&train_containers));
-    }
+    let class_protos_20: Vec<Container> = classes.iter()
+        .map(|(_, indices)| {
+            let refs: Vec<&Container> = indices.iter()
+                .take(train_per_class)
+                .map(|&i| &containers[i])
+                .collect();
+            Container::bundle(&refs)
+        })
+        .collect();
     let train_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
-    let (top1, top5) = hamming_evaluate(&test_samples_full, &containers, &class_prototypes);
+    let (h_top1, h_top5) = hamming_nn(&test_samples, &containers, &class_protos_20);
     let test_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let total_test_full = test_samples_full.len();
 
-    println!("  Top-1: {}/{} = {:.1}%   Top-5: {}/{} = {:.1}%",
-             top1, total_test_full, pct(top1, total_test_full),
-             top5, total_test_full, pct(top5, total_test_full));
-    println!("  Time: train={:.0}ms test={:.0}ms total={:.0}ms",
-             train_ms, test_ms, train_ms + test_ms);
+    println!("  Top-1: {}/{} = {:.1}%   Top-5: {:.1}%   ({:.0}ms train + {:.0}ms test)",
+             h_top1, total_test, pct(h_top1, total_test),
+             pct(h_top5, total_test), train_ms, test_ms);
+
+    // Also test with 400 train (the full bundle — this is the "old" result)
+    let class_protos_400: Vec<Container> = classes.iter()
+        .map(|(_, indices)| {
+            let refs: Vec<&Container> = indices.iter()
+                .take(400)
+                .map(|&i| &containers[i])
+                .collect();
+            Container::bundle(&refs)
+        })
+        .collect();
+    let (h400_top1, h400_top5) = hamming_nn(&test_samples, &containers, &class_protos_400);
+    println!("  (400 train bundle: Top-1={:.1}% Top-5={:.1}%)",
+             pct(h400_top1, total_test), pct(h400_top5, total_test));
     println!();
 
     // =========================================================================
-    // METHOD 2–4: Gram-Schmidt Recognition at various D
+    // Gram-Schmidt Recognition at various D
     // =========================================================================
-    // (D, channels, label, max_test_per_class)
-    // Larger D → slower projection → test fewer samples
-    for &(d, channels, label, test_limit) in &[
-        (8192, 64, "8K", 50),
-        (16384, 128, "16K", 20),
-        (32768, 200, "32K", 10),
-        (65536, 200, "64K", 5),
+    // Strategy: compute class centroid in embedding space, project ONCE per class,
+    // then recognition = project query + GS readout (no WAL writes needed for test).
+
+    for &(d, label, test_limit) in &[
+        (4096usize, "4K", 50usize),
+        (8192, "8K", 50),
+        (16384, "16K", 20),
+        (32768, "32K", 10),
     ] {
-        // Reduce test samples for larger D
-        let test_samples: Vec<(usize, usize)> = classes.iter().enumerate()
-            .flat_map(|(c, (_, indices))| {
-                indices.iter().skip(train_per_class).take(test_limit)
-                    .map(move |&idx| (idx, c))
-            })
-            .collect();
-        let total_test = test_samples.len();
         println!("═══════════════════════════════════════════════════════════════════");
-        println!("  METHOD 2-4: Gram-Schmidt Recognition — D={} ({})", d, label);
+        println!("  GRAM-SCHMIDT RECOGNITION — D={} ({})", d, label);
         println!("═══════════════════════════════════════════════════════════════════");
 
         let seed: u64 = 0xADA0_C11B_FEA1;
+        let channels = d / 64; // reasonable channel count
 
-        // Register + Learn
+        // Step 1: Compute class centroids in embedding space
         let t = Instant::now();
-        let mut rec = Recognizer::new(d, channels.min(num_classes), dim, seed);
+        let centroids: Vec<Vec<f32>> = classes.iter()
+            .map(|(_, indices)| {
+                let n = train_per_class.min(indices.len());
+                let mut centroid = vec![0.0f32; dim];
+                for &idx in &indices[..n] {
+                    for (j, &v) in embeddings[idx].iter().enumerate() {
+                        centroid[j] += v;
+                    }
+                }
+                for v in &mut centroid { *v /= n as f32; }
+                // L2 normalize
+                let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 { for v in &mut centroid { *v /= norm; } }
+                centroid
+            })
+            .collect();
 
-        for (cls_name, indices) in &classes {
-            let rep_idx = indices[0];
-            rec.register_class(cls_name, &embeddings[rep_idx]);
+        // Step 2: Register centroids with the Recognizer
+        let mut rec = Recognizer::new(d, channels.min(num_classes), dim, seed);
+        for (c, (cls_name, _)) in classes.iter().enumerate() {
+            rec.register_class(cls_name, &centroids[c]);
         }
 
-        // Train: accumulate samples
+        // Step 3: (Optional) Train a few WAL writes to build the container
         for (c, (_, indices)) in classes.iter().enumerate() {
-            let end = train_per_class.min(indices.len());
-            for &idx in &indices[1..end] {
+            let n = train_per_class.min(indices.len());
+            for &idx in &indices[1..n.min(6)] { // 5 writes per class max
                 rec.learn(c, &embeddings[idx], 0.5);
             }
         }
         let train_ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!("  Train: {:.0}ms (centroid + {} WAL writes, sat={:.1}%)",
+                 train_ms, num_classes * 5, rec.saturation() * 100.0);
 
-        println!("  Training: {:.0}ms ({} classes × {} samples, sat={:.1}%)",
-                 train_ms, num_classes, train_per_class - 1, rec.saturation() * 100.0);
+        // Step 4: Test with reduced samples for larger D
+        let test_subset: Vec<&(usize, usize)> = test_samples.iter()
+            .enumerate()
+            .filter(|(i, _)| i % (test_per_class / test_limit).max(1) == 0)
+            .map(|(_, s)| s)
+            .collect();
+        let n_test = test_subset.len();
 
-        // Test: Orthogonal (full Gram-Schmidt) recognition
+        // Gram-Schmidt (orthogonal) recognition
         let t = Instant::now();
         let mut gs_top1 = 0usize;
         let mut gs_top5 = 0usize;
-        for &(global_idx, true_class) in &test_samples {
+        for &&(global_idx, true_class) in &test_subset {
             let result = rec.recognize(&embeddings[global_idx]);
             if result.top1_class == true_class { gs_top1 += 1; }
             if result.ranked.iter().take(5).any(|&(c, _)| c == true_class) { gs_top5 += 1; }
         }
         let gs_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-        println!("  Gram-Schmidt (orth): Top-1={:.1}%  Top-5={:.1}%  ({:.0}ms)",
-                 pct(gs_top1, total_test), pct(gs_top5, total_test), gs_ms);
+        println!("  Gram-Schmidt (orth): Top-1={}/{} = {:.1}%  Top-5={:.1}%  ({:.0}ms, {:.1}ms/q)",
+                 gs_top1, n_test, pct(gs_top1, n_test),
+                 pct(gs_top5, n_test), gs_ms, gs_ms / n_test as f64);
 
-        // Test: Independent (no orthogonalization) recognition
+        // Independent (non-orthogonal) recognition
         let t = Instant::now();
         let mut indep_top1 = 0usize;
         let mut indep_top5 = 0usize;
-        for &(global_idx, true_class) in &test_samples {
+        for &&(global_idx, true_class) in &test_subset {
             let result = rec.recognize_independent(&embeddings[global_idx]);
             if result.top1_class == true_class { indep_top1 += 1; }
             if result.ranked.iter().take(5).any(|&(c, _)| c == true_class) { indep_top5 += 1; }
         }
         let indep_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-        println!("  Independent:         Top-1={:.1}%  Top-5={:.1}%  ({:.0}ms)",
-                 pct(indep_top1, total_test), pct(indep_top5, total_test), indep_ms);
+        println!("  Independent:         Top-1={}/{} = {:.1}%  Top-5={:.1}%  ({:.0}ms)",
+                 indep_top1, n_test, pct(indep_top1, n_test),
+                 pct(indep_top5, n_test), indep_ms);
 
-        // Test: Two-stage (Hamming shortlist + GS re-rank)
-        let t = Instant::now();
-        let mut ts_top1 = 0usize;
-        let mut ts_top5 = 0usize;
-        for &(global_idx, true_class) in &test_samples {
-            let result = rec.recognize_two_stage(&embeddings[global_idx], 20);
-            if result.top1_class == true_class { ts_top1 += 1; }
-            if result.ranked.iter().take(5).any(|&(c, _)| c == true_class) { ts_top5 += 1; }
-        }
-        let ts_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        println!("  Two-stage (top-20):  Top-1={:.1}%  Top-5={:.1}%  ({:.0}ms)",
-                 pct(ts_top1, total_test), pct(ts_top5, total_test), ts_ms);
-
-        // Novelty detection: average residual energy for known vs unknown-ish
-        let mut known_residuals = Vec::new();
-        for &(global_idx, _) in test_samples.iter().take(200) {
+        // Novelty: residual energy
+        let mut residuals = Vec::new();
+        for &&(global_idx, _) in test_subset.iter().take(100) {
             let result = rec.recognize(&embeddings[global_idx]);
-            known_residuals.push(result.residual_energy);
+            residuals.push(result.residual_energy);
         }
-        let known_mean: f32 = known_residuals.iter().sum::<f32>() / known_residuals.len() as f32;
-        println!("  Avg residual energy: {:.4}", known_mean);
+        let mean_res: f32 = residuals.iter().sum::<f32>() / residuals.len().max(1) as f32;
+        println!("  Avg residual: {:.4}", mean_res);
         println!();
     }
 
-    // =========================================================================
-    // Summary table
-    // =========================================================================
+    // Summary
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  SUMMARY — {} classes", num_classes);
+    println!("  SUMMARY — {} classes, Hamming baseline with {} train vs {} train",
+             num_classes, train_per_class, 400);
     println!("═══════════════════════════════════════════════════════════════════");
-    println!();
-    println!("  Method                    Top-1%    Top-5%");
-    println!("  ─────────────────────────────────────────");
-    println!("  Binary Hamming (8K)       {:.1}%     {:.1}%  ({} test)",
-             pct(top1, total_test_full), pct(top5, total_test_full), total_test_full);
-    println!("  (see Gram-Schmidt results above for D=8K,16K,32K,64K)");
+    println!("  Hamming (20 train):   Top-1={:.1}%  Top-5={:.1}%",
+             pct(h_top1, total_test), pct(h_top5, total_test));
+    println!("  Hamming (400 train):  Top-1={:.1}%  Top-5={:.1}%",
+             pct(h400_top1, total_test), pct(h400_top5, total_test));
+    println!("  (Gram-Schmidt results above)");
     println!();
 }
 
-fn hamming_evaluate(
+fn hamming_nn(
     test_samples: &[(usize, usize)],
     containers: &[Container],
     prototypes: &[Container],
