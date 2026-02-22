@@ -30,12 +30,23 @@
 pub mod container_ext;
 pub mod hdr;
 pub mod sweep;
+pub mod wide_sweep;
 pub mod cascade;
 pub mod exposure;
 pub mod ingest;
+#[cfg(feature = "rustynum")]
+pub mod simd_bridge;
+#[cfg(feature = "rustynum")]
+pub mod blackboard_sweep;
+#[cfg(any(feature = "lance-io", feature = "datafusion-scan"))]
+pub mod storage;
+#[cfg(feature = "oracle")]
+pub mod organic_learn;
 
 // Re-export core types from ladybug-contract
 pub use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS, CONTAINER_BYTES};
+pub use ladybug_contract::wide_container::{WideContainer, EmbeddingFormat, WIDE_BITS, WIDE_BYTES, WIDE_WORDS};
+pub use ladybug_contract::cogrecord8k::{CogRecord8K, RECORD8K_BITS, RECORD8K_BYTES, SLOT_META, SLOT_CAM, SLOT_INDEX, SLOT_EMBED};
 
 /// HDR exposure score (0-6 scale)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

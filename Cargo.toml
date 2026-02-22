@@ -28,12 +28,33 @@ path = "src/bin/poc.rs"
 name = "download-data"
 path = "src/bin/download_data.rs"
 
+[[bin]]
+name = "xtrans-experiment"
+path = "src/bin/xtrans_experiment.rs"
+
+[[bin]]
+name = "thirds-experiment"
+path = "src/bin/thirds_experiment.rs"
+
+[[bin]]
+name = "cogrecord8k-experiment"
+path = "src/bin/cogrecord8k_experiment.rs"
+
+[[bin]]
+name = "organic-learn"
+path = "src/bin/organic_learn.rs"
+required-features = ["oracle"]
+
 # =============================================================================
 # FEATURES
 # =============================================================================
 [features]
-default = ["simd"]
+default = ["simd", "rustynum", "oracle"]
 simd = []
+rustynum = ["dep:rustynum-rs", "dep:rustynum-core"]
+oracle = ["dep:rustynum-oracle", "dep:rustynum-core"]
+lance-io = ["dep:rustynum-arrow", "dep:tokio", "rustynum-arrow/lance", "rustynum-arrow/arrow", "rustynum"]
+datafusion-scan = ["dep:rustynum-arrow", "dep:arrow", "rustynum-arrow/datafusion", "rustynum-arrow/arrow", "rustynum"]
 fastembed = ["dep:fastembed"]
 load-image = ["dep:image"]
 
@@ -41,7 +62,12 @@ load-image = ["dep:image"]
 # DEPENDENCIES
 # =============================================================================
 [dependencies]
-ladybug-contract = { git = "https://github.com/AdaWorldAPI/ladybug-rs.git", branch = "main" }
+ladybug-contract = { path = "/home/user/ladybug-rs/crates/ladybug-contract" }
+rustynum-rs = { path = "/home/user/rustynum/rustynum-rs", default-features = false, optional = true }
+rustynum-core = { path = "/home/user/rustynum/rustynum-core", default-features = false, optional = true }
+rustynum-oracle = { path = "/home/user/rustynum/rustynum-oracle", default-features = false, optional = true }
+rustynum-arrow = { path = "/home/user/rustynum/rustynum-arrow", default-features = false, optional = true }
+arrow = { version = "57", optional = true, default-features = false, features = ["ffi"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -51,6 +77,9 @@ image = { version = "0.25", optional = true, default-features = false, features 
 
 rand = "0.8"
 rayon = "1"
+
+# Async runtime for Lance I/O
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

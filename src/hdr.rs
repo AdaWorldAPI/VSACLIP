@@ -40,6 +40,11 @@ impl Default for HdrConfig {
 }
 
 impl HdrConfig {
+    /// Create for a given bit-width using default fractions.
+    pub fn for_bits(d: u32) -> Self {
+        Self::from_fractions(HDR_HOT_FRAC, HDR_MID_FRAC, HDR_COLD_FRAC, d)
+    }
+
     /// Create from fractional thresholds
     pub fn from_fractions(hot: f32, mid: f32, cold: f32, d: u32) -> Self {
         Self {
