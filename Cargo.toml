@@ -40,13 +40,19 @@ path = "src/bin/thirds_experiment.rs"
 name = "cogrecord8k-experiment"
 path = "src/bin/cogrecord8k_experiment.rs"
 
+[[bin]]
+name = "organic-learn"
+path = "src/bin/organic_learn.rs"
+required-features = ["oracle"]
+
 # =============================================================================
 # FEATURES
 # =============================================================================
 [features]
-default = ["simd", "rustynum"]
+default = ["simd", "rustynum", "oracle"]
 simd = []
 rustynum = ["dep:rustynum-rs", "dep:rustynum-core"]
+oracle = ["dep:rustynum-oracle", "dep:rustynum-core"]
 lance-io = ["dep:rustynum-arrow", "dep:tokio", "rustynum-arrow/lance", "rustynum-arrow/arrow", "rustynum"]
 datafusion-scan = ["dep:rustynum-arrow", "dep:arrow", "rustynum-arrow/datafusion", "rustynum-arrow/arrow", "rustynum"]
 fastembed = ["dep:fastembed"]
@@ -59,6 +65,7 @@ load-image = ["dep:image"]
 ladybug-contract = { path = "/home/user/ladybug-rs/crates/ladybug-contract" }
 rustynum-rs = { path = "/home/user/rustynum/rustynum-rs", default-features = false, optional = true }
 rustynum-core = { path = "/home/user/rustynum/rustynum-core", default-features = false, optional = true }
+rustynum-oracle = { path = "/home/user/rustynum/rustynum-oracle", default-features = false, optional = true }
 rustynum-arrow = { path = "/home/user/rustynum/rustynum-arrow", default-features = false, optional = true }
 arrow = { version = "57", optional = true, default-features = false, features = ["ffi"] }
 

@@ -40,6 +40,8 @@ pub mod simd_bridge;
 pub mod blackboard_sweep;
 #[cfg(any(feature = "lance-io", feature = "datafusion-scan"))]
 pub mod storage;
+#[cfg(feature = "oracle")]
+pub mod organic_learn;
 
 // Re-export core types from ladybug-contract
 pub use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS, CONTAINER_BYTES};

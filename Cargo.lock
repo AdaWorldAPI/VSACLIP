@@ -5239,6 +5239,14 @@ name = "rustynum-core"
 version = "0.1.0"
 
 [[package]]
+name = "rustynum-oracle"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "rustynum-core",
+]
+
+[[package]]
 name = "rustynum-rs"
 version = "0.1.0"
 
@@ -6413,6 +6421,7 @@ dependencies = [
  "rayon",
  "rustynum-arrow",
  "rustynum-core",
+ "rustynum-oracle",
  "rustynum-rs",
  "serde",
  "serde_json",
