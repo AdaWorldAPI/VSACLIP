@@ -1,0 +1,16 @@
+[package]
+name = "rustynum-oracle"
+version = "0.1.0"
+edition = "2021"
+description = "Three-temperature holographic oracle with capacity sweep for optimal parameter discovery"
+
+[features]
+default = ["avx512"]
+avx512 = ["rustynum-core/avx512"]
+avx2 = ["rustynum-core/avx2"]
+
+[dependencies]
+rustynum-core = { path = "../rustynum-core", default-features = false }
+rand = "0.8"
+
+[dev-dependencies]
