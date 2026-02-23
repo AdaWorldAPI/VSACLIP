@@ -45,6 +45,16 @@ name = "organic-learn"
 path = "src/bin/organic_learn.rs"
 required-features = ["oracle"]
 
+[[bin]]
+name = "head-to-head"
+path = "src/bin/head_to_head.rs"
+required-features = ["oracle"]
+
+[[bin]]
+name = "recognize-experiment"
+path = "src/bin/recognize_experiment.rs"
+required-features = ["oracle"]
+
 # =============================================================================
 # FEATURES
 # =============================================================================
