@@ -93,9 +93,9 @@ impl BlackboardSweep {
         if required > self.capacity {
             let new_cap = required.next_power_of_two().max(16);
             // Allocate new buffer (old one is freed by Blackboard)
-            let old_db = self.bb.get_u8("db").to_vec();
+            let old_db = self.bb.get_u8("db").unwrap().to_vec();
             self.bb.alloc_u8("db", new_cap * RECORD_BYTES);
-            let db = self.bb.get_u8_mut("db");
+            let db = self.bb.get_u8_mut("db").unwrap();
             db[..old_db.len()].copy_from_slice(&old_db);
             self.capacity = new_cap;
         }
@@ -105,13 +105,13 @@ impl BlackboardSweep {
     ///
     /// Zero-copy from ladybug-contract's `as_bytes()` into the blackboard.
     pub fn set_query_8k(&mut self, record: &CogRecord8K) {
-        let buf = self.bb.get_u8_mut("query");
+        let buf = self.bb.get_u8_mut("query").unwrap();
         buf.copy_from_slice(record.as_bytes());
     }
 
     /// Load a rustynum CogRecord into the query buffer.
     pub fn set_query(&mut self, record: &CogRecord) {
-        let buf = self.bb.get_u8_mut("query");
+        let buf = self.bb.get_u8_mut("query").unwrap();
         let bytes = record.to_bytes();
         buf.copy_from_slice(&bytes);
     }
@@ -120,7 +120,7 @@ impl BlackboardSweep {
     pub fn push_8k(&mut self, record: &CogRecord8K) {
         self.ensure_capacity(self.len + 1);
         let offset = self.len * RECORD_BYTES;
-        let db = self.bb.get_u8_mut("db");
+        let db = self.bb.get_u8_mut("db").unwrap();
         db[offset..offset + RECORD_BYTES].copy_from_slice(record.as_bytes());
         self.len += 1;
     }
@@ -130,7 +130,7 @@ impl BlackboardSweep {
         self.ensure_capacity(self.len + 1);
         let offset = self.len * RECORD_BYTES;
         let bytes = record.to_bytes();
-        let db = self.bb.get_u8_mut("db");
+        let db = self.bb.get_u8_mut("db").unwrap();
         db[offset..offset + RECORD_BYTES].copy_from_slice(&bytes);
         self.len += 1;
     }
@@ -139,7 +139,7 @@ impl BlackboardSweep {
     pub fn load_8k(&mut self, records: &[CogRecord8K]) {
         let n = records.len();
         self.ensure_capacity(n);
-        let db = self.bb.get_u8_mut("db");
+        let db = self.bb.get_u8_mut("db").unwrap();
         for (i, rec) in records.iter().enumerate() {
             let offset = i * RECORD_BYTES;
             db[offset..offset + RECORD_BYTES].copy_from_slice(rec.as_bytes());
@@ -151,7 +151,7 @@ impl BlackboardSweep {
     pub fn load(&mut self, records: &[CogRecord]) {
         let n = records.len();
         self.ensure_capacity(n);
-        let db = self.bb.get_u8_mut("db");
+        let db = self.bb.get_u8_mut("db").unwrap();
         for (i, rec) in records.iter().enumerate() {
             let offset = i * RECORD_BYTES;
             let bytes = rec.to_bytes();
@@ -169,10 +169,10 @@ impl BlackboardSweep {
     /// The sweep operates directly on the blackboard's flat buffers —
     /// no allocation, no borrow-checker conflicts, no copies.
     pub fn sweep(&self, thresholds: [u64; 4]) -> Vec<SweepResult> {
-        let query_bytes = self.bb.get_u8("query");
+        let query_bytes = self.bb.get_u8("query").unwrap();
         let query = CogRecord::from_bytes(query_bytes);
 
-        let db_bytes = self.bb.get_u8("db");
+        let db_bytes = self.bb.get_u8("db").unwrap();
         let db_slice = &db_bytes[..self.len * RECORD_BYTES];
 
         sweep_cogrecords(&query, db_slice, self.len, thresholds)
