@@ -42,6 +42,8 @@ pub mod blackboard_sweep;
 pub mod storage;
 #[cfg(feature = "oracle")]
 pub mod organic_learn;
+#[cfg(feature = "rustynum")]
+pub mod hybrid_recognition;
 
 // Re-export core types from ladybug-contract
 pub use ladybug_contract::container::{Container, CONTAINER_BITS, CONTAINER_WORDS, CONTAINER_BYTES};
